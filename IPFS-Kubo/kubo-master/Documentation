@@ -1,3 +1,0 @@
- git clone https://github.com/ipfs/kubo.git
-cd kubo
-go build -o bock-ipfs.exe ./cmd/ipfs
