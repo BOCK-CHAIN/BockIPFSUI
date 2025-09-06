@@ -17,7 +17,7 @@ interface UploadResult {
 
 interface RetrieveResult {
   success: boolean;
-  type?: 'image' | 'text' | 'file';
+  type?: 'image' | 'text' | 'file' | 'pdf';
   url?: string;
   content?: string;
   contentType?: string;
@@ -34,9 +34,10 @@ const IPFSInterface = () => {
   const [retrieveLoading, setRetrieveLoading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
 
-  const PROXY_URL = 'http://localhost:9000';
+  // Backend API URL
+  const API_URL = 'http://localhost:4000';
 
-  // Handle file upload
+  // Handle file upload using backend API
   const handleFileUpload = async (file: File) => {
     if (!file) return;
 
@@ -47,16 +48,28 @@ const IPFSInterface = () => {
       const formData = new FormData();
       formData.append('file', file);
 
-      const response = await fetch(`${PROXY_URL}/bockipfs/api/v0/add`, {
+      console.log('Uploading file:', { 
+        name: file.name, 
+        type: file.type, 
+        size: file.size 
+      });
+
+      // Use backend upload endpoint
+      const response = await fetch(`${API_URL}/upload`, {
         method: 'POST',
         body: formData,
       });
 
       if (!response.ok) {
-        throw new Error(`Upload failed: ${response.statusText}`);
+        const errorData = await response.json().catch(() => ({ 
+          error: `HTTP ${response.status}: ${response.statusText}` 
+        }));
+        throw new Error(errorData.error || `Upload failed: ${response.statusText}`);
       }
 
       const result = await response.json();
+      console.log('Upload result:', result);
+      
       setUploadResult({
         success: true,
         hash: result.Hash,
@@ -67,6 +80,7 @@ const IPFSInterface = () => {
         fileSize: file.size
       });
     } catch (error) {
+      console.error('Upload error:', error);
       setUploadResult({
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error occurred'
@@ -114,48 +128,74 @@ const IPFSInterface = () => {
     setRetrieveResult(null);
 
     try {
-      const response = await fetch(`${PROXY_URL}/bockipfs/${retrieveHash.trim()}`);
+      const hash = retrieveHash.trim();
+      console.log('Retrieving content for hash:', hash);
+
+      // First, make a HEAD request to get content info
+      const headResponse = await fetch(`${API_URL}/get-content/${hash}`, {
+        method: 'HEAD'
+      }).catch(() => null);
+
+      const contentType = headResponse?.headers.get('content-type') || '';
+      const contentLength = headResponse?.headers.get('content-length');
       
-      if (!response.ok) {
-        throw new Error(`Retrieval failed: ${response.statusText}`);
-      }
+      console.log('Content info:', { contentType, contentLength });
 
-      const contentType = response.headers.get('content-type') || '';
+      const isText = contentType.startsWith('text/') || 
+                   contentType.includes('json') || 
+                   contentType.includes('javascript');
+      const isPdf = contentType === 'application/pdf';
       const isImage = contentType.startsWith('image/');
-      const isText = contentType.startsWith('text/') || contentType.includes('json');
 
-      if (isImage) {
-        const blob = await response.blob();
-        const imageUrl = URL.createObjectURL(blob);
-        setRetrieveResult({
-          success: true,
-          type: 'image',
-          url: imageUrl,
-          contentType
-        });
-      } else if (isText) {
+      if (isText && contentLength && parseInt(contentLength) < 50000) { 
+        // Only read small text files
+        const response = await fetch(`${API_URL}/get-content/${hash}`);
+        if (!response.ok) throw new Error(`Failed to fetch: ${response.statusText}`);
+        
         const text = await response.text();
         setRetrieveResult({
           success: true,
           type: 'text',
           content: text,
-          contentType
+          contentType,
+          size: parseInt(contentLength || '0')
+        });
+      } else if (isPdf) {
+        // For PDFs, provide both direct URL and viewer URL
+        const directUrl = `${API_URL}/get-content/${hash}`;
+        
+        setRetrieveResult({
+          success: true,
+          type: 'pdf',
+          url: directUrl,
+          contentType,
+          size: parseInt(contentLength || '0')
+        });
+      } else if (isImage) {
+        const url = `${API_URL}/get-content/${hash}`;
+        setRetrieveResult({
+          success: true,
+          type: 'image',
+          url,
+          contentType,
+          size: parseInt(contentLength || '0')
         });
       } else {
-        const blob = await response.blob();
-        const fileUrl = URL.createObjectURL(blob);
+        // Generic file download
+        const url = `${API_URL}/get-content/${hash}`;
         setRetrieveResult({
           success: true,
           type: 'file',
-          url: fileUrl,
+          url,
           contentType,
-          size: blob.size
+          size: parseInt(contentLength || '0')
         });
       }
-    } catch (error) {
+    } catch (err) {
+      console.error('Retrieve error:', err);
       setRetrieveResult({
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error occurred'
+        error: err instanceof Error ? err.message : 'Unknown error occurred',
       });
     } finally {
       setRetrieveLoading(false);
@@ -164,7 +204,11 @@ const IPFSInterface = () => {
 
   // Copy hash to clipboard
   const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
+    navigator.clipboard.writeText(text).then(() => {
+      console.log('Hash copied to clipboard');
+    }).catch(err => {
+      console.error('Failed to copy:', err);
+    });
   };
 
   return (
@@ -177,7 +221,7 @@ const IPFSInterface = () => {
               BOCK IPFS Interface
             </h1>
             <p className="text-xl opacity-90 max-w-2xl mx-auto">
-              Upload files to IPFS and retrieve content using hash addresses through your BOCK proxy server
+              Upload files to IPFS and retrieve content using hash addresses through BOCK proxy server
             </p>
           </div>
         </div>
@@ -223,6 +267,7 @@ const IPFSInterface = () => {
                   <div className="flex flex-col items-center">
                     <Loader2 className="w-16 h-16 text-blue-500 animate-spin mb-4" />
                     <p className="text-lg text-gray-600">Uploading to IPFS...</p>
+                    <p className="text-sm text-gray-500 mt-2">Please wait, this may take a moment</p>
                   </div>
                 ) : (
                   <div className="flex flex-col items-center">
@@ -231,6 +276,7 @@ const IPFSInterface = () => {
                       Drag & drop your file here
                     </p>
                     <p className="text-gray-500">or click to browse</p>
+                    <p className="text-sm text-gray-400 mt-2">PDFs, images, documents - all supported</p>
                   </div>
                 )}
               </div>
@@ -258,12 +304,23 @@ const IPFSInterface = () => {
                               {uploadResult.hash}
                             </code>
                             <button
-                              onClick={() => uploadResult.hash && copyToClipboard(uploadResult.hash)}
-                              className="p-2 text-blue-600 hover:bg-blue-100 rounded-lg transition-colors"
-                              title="Copy hash"
+                              onClick={() => copyToClipboard(uploadResult.hash || '')}
+                              className="p-2 text-green-600 hover:bg-green-100 rounded-lg transition-colors"
+                              title="Copy Hash"
                             >
                               <Copy className="w-4 h-4" />
                             </button>
+                            <a
+                              href={`${API_URL}/get-content/${uploadResult.hash}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="p-2 text-green-600 hover:bg-green-100 rounded-lg transition-colors"
+                              title="Open in New Tab"
+                            >
+                              <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                              </svg>
+                            </a>
                           </div>
                         </div>
                         
@@ -286,6 +343,9 @@ const IPFSInterface = () => {
                         <div>
                           <h3 className="text-lg font-semibold text-red-800">Upload Failed</h3>
                           <p className="text-red-700">{uploadResult.error}</p>
+                          <p className="text-sm text-red-600 mt-2">
+                            Make sure BOCK IPFS is running on localhost:9000
+                          </p>
                         </div>
                       </div>
                     </div>
@@ -318,7 +378,7 @@ const IPFSInterface = () => {
                         type="text"
                         value={retrieveHash}
                         onChange={(e) => setRetrieveHash(e.target.value)}
-                        placeholder="Enter IPFS hash (Qm...)"
+                        placeholder="Enter IPFS hash (Qm... or bafy...)"
                         className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
                       />
                     </div>
@@ -349,19 +409,55 @@ const IPFSInterface = () => {
                       
                       {retrieveResult.type === 'image' && retrieveResult.url && (
                         <div className="space-y-4">
-                          <img
-                            src={retrieveResult.url}
-                            alt="Retrieved content"
+                          <img 
+                            src={retrieveResult.url} 
+                            alt="Retrieved content" 
                             className="max-w-full h-auto rounded-lg border border-gray-200 shadow-sm"
+                            onError={(e) => {
+                              (e.target as HTMLImageElement).style.display = 'none';
+                            }}
                           />
-                          <div className="flex gap-2">
+                          <a
+                            href={retrieveResult.url}
+                            download
+                            className="inline-block px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-sm font-medium"
+                          >
+                            Download Image
+                          </a>
+                        </div>
+                      )}
+
+                      {retrieveResult.type === 'pdf' && retrieveResult.url && (
+                        <div className="space-y-4">
+                          <div className="border border-gray-200 rounded-lg overflow-hidden">
+                            <iframe
+                              src={retrieveResult.url}
+                              title="PDF Preview"
+                              className="w-full h-[600px]"
+                              onError={() => {
+                                console.log('PDF iframe failed to load');
+                              }}
+                            />
+                          </div>
+                          <div className="flex gap-2 flex-wrap">
                             <a
                               href={retrieveResult.url}
                               download
-                              className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-sm font-medium"
+                              className="inline-block px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-sm font-medium"
                             >
-                              Download Image
+                              Download PDF
                             </a>
+                            <a
+                              href={`${API_URL}/view-pdf/${retrieveHash.trim()}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-block px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors text-sm font-medium"
+                            >
+                              Open in PDF Viewer
+                            </a>
+                          </div>
+                          <div className="text-sm text-gray-600">
+                            <p>Size: {retrieveResult.size ? (retrieveResult.size / 1024).toFixed(2) : 'Unknown'} KB</p>
                           </div>
                         </div>
                       )}
@@ -410,6 +506,9 @@ const IPFSInterface = () => {
                         <div>
                           <h3 className="text-lg font-semibold text-red-800">Retrieval Failed</h3>
                           <p className="text-red-700">{retrieveResult.error}</p>
+                          <p className="text-sm text-red-600 mt-2">
+                            Make sure the hash is valid and the content exists in IPFS
+                          </p>
                         </div>
                       </div>
                     </div>
@@ -424,7 +523,41 @@ const IPFSInterface = () => {
         <div className="mt-12 text-center">
           <div className="inline-flex items-center gap-2 px-4 py-2 bg-white rounded-full shadow-lg border border-gray-200">
             <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-            <span className="text-sm text-gray-600">Connected to BOCK IPFS Proxy (localhost:9000)</span>
+            <span className="text-sm text-gray-600">Connected via Backend API (localhost:4000) → BOCK IPFS</span>
+          </div>
+        </div>
+
+        {/* Instructions */}
+        <div className="mt-8 bg-white rounded-xl shadow-lg border border-gray-100 p-6">
+          <h3 className="text-lg font-semibold text-gray-800 mb-4">Getting Started</h3>
+          <div className="grid md:grid-cols-2 gap-6 text-sm text-gray-600">
+            <div>
+              <h4 className="font-medium text-gray-800 mb-2">Prerequisites:</h4>
+              <ul className="space-y-1">
+                <li>• BOCK IPFS daemon running on localhost:9000</li>
+                <li>• Backend API server running on localhost:4000</li>
+                <li>• BOCK gateway accessible on localhost:8080</li>
+              </ul>
+            </div>
+            <div>
+              <h4 className="font-medium text-gray-800 mb-2">Features:</h4>
+              <ul className="space-y-1">
+                <li>• Upload any file type to IPFS</li>
+                <li>• Retrieve content using IPFS hashes</li>
+                <li>• Built-in PDF viewer</li>
+                <li>• Image preview</li>
+                <li>• Text content display</li>
+              </ul>
+            </div>
+          </div>
+          
+          <div className="mt-6 p-4 bg-blue-50 rounded-lg">
+            <h4 className="font-medium text-blue-800 mb-2">Troubleshooting:</h4>
+            <div className="text-sm text-blue-700 space-y-1">
+              <p>• If uploads fail: Check BOCK daemon logs and ensure ports 9000/8080 are available</p>
+              <p>• If PDFs won't display: Try the "Open in PDF Viewer" button or download directly</p>
+              <p>• For large files: Increase timeout settings and file size limits</p>
+            </div>
           </div>
         </div>
       </div>
